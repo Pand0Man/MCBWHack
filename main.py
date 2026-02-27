@@ -244,6 +244,7 @@ hotkey_refs: dict[str, tuple[str, int]] = {}
 website_opened_once = False
 inject_lock = threading.Lock()
 injecting_extra_click = False
+hotkey_pressed_state: dict[str, bool] = {"build": False, "click": False, "double": False}
 
 
 def detect_minecraft_process() -> tuple[bool, str, str]:
@@ -440,13 +441,46 @@ def bind_hotkeys() -> None:
         hotkey_refs[action] = (key, hotkey_id)
 
 
-def hotkey_watcher() -> None:
-    while True:
+def poll_hotkeys_fallback() -> None:
+    with state_lock:
+        expected = {
+            "build": state.build_key,
+            "click": state.click_key,
+            "double": state.double_key,
+        }
+
+    callbacks = {
+        "build": toggle_build,
+        "click": toggle_click,
+        "double": toggle_double,
+    }
+
+    for action, key in expected.items():
         try:
-            bind_hotkeys()
+            pressed = keyboard.is_pressed(key)
         except Exception:
-            pass
-        time.sleep(1)
+            pressed = False
+
+        previously_pressed = hotkey_pressed_state.get(action, False)
+        if pressed and not previously_pressed:
+            callbacks[action]()
+
+        hotkey_pressed_state[action] = pressed
+
+
+def hotkey_watcher() -> None:
+    bind_tick = 0
+    while True:
+        if bind_tick <= 0:
+            try:
+                bind_hotkeys()
+            except Exception:
+                pass
+            bind_tick = 30
+
+        poll_hotkeys_fallback()
+        bind_tick -= 1
+        time.sleep(0.03)
 
 
 @app.get("/")
