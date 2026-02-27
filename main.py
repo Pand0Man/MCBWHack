@@ -1,8 +1,11 @@
+import ctypes
 import threading
 import time
 import webbrowser
 from dataclasses import asdict, dataclass
 from typing import Any
+
+from ctypes import wintypes
 
 import keyboard
 import psutil
@@ -265,9 +268,37 @@ def detect_minecraft_process() -> tuple[bool, str, str]:
     return False, "", ""
 
 
+def foreground_process_name() -> str:
+    if not hasattr(ctypes, "windll"):
+        return ""
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return ""
+
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return ""
+
+    try:
+        return (psutil.Process(pid.value).name() or "").lower()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return ""
+
+
+def is_minecraft_foreground() -> bool:
+    proc_name = foreground_process_name()
+    if not proc_name:
+        return False
+    return any(x in proc_name for x in ("java", "javaw", "minecraft"))
+
+
 def can_run_actions() -> bool:
     with state_lock:
-        return state.minecraft_connected
+        connected = state.minecraft_connected
+    return connected and is_minecraft_foreground()
 
 
 def click_interval() -> float:
@@ -302,6 +333,11 @@ def double_click_listener() -> None:
     if mouse_lib is None:
         return
 
+    def reset_injecting() -> None:
+        global injecting_extra_click
+        with inject_lock:
+            injecting_extra_click = False
+
     def handle(event) -> None:
         global injecting_extra_click
         if getattr(event, "event_type", "") != "down" or getattr(event, "button", "") != "left":
@@ -310,7 +346,7 @@ def double_click_listener() -> None:
         with state_lock:
             enabled = state.double_click_enabled and state.minecraft_connected and not state.auto_click_enabled
 
-        if not enabled:
+        if not enabled or not is_minecraft_foreground():
             return
 
         with inject_lock:
@@ -319,11 +355,11 @@ def double_click_listener() -> None:
             injecting_extra_click = True
 
         try:
-            time.sleep(min(0.05, click_interval() / 2))
             pyautogui.click(button="left")
         finally:
-            with inject_lock:
-                injecting_extra_click = False
+            timer = threading.Timer(0.02, reset_injecting)
+            timer.daemon = True
+            timer.start()
 
     mouse_lib.hook(handle)
 
